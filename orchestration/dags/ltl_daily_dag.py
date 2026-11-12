@@ -63,9 +63,18 @@ with DAG(
         task_id="dq_check",
         bash_command=spark_submit("dq_check_job.py", "--biz-date", biz),
     )
+    # 双口径时效：DWD 明细就绪后按完结日计算内部/客户两套口径（口径登记一次性完成，
+    # 见 timeliness_job seed-calibers；周期出具由独立手动 DAG/命令触发，禁止自动重排历史）
+    timeliness = BashOperator(
+        task_id="timeliness_compute",
+        bash_command=spark_submit("timeliness_job.py", "compute",
+                                  "--biz-date", biz),
+    )
     end = EmptyOperator(task_id="end")
 
     # ODS 与维表落地互不依赖可并行；拉链必须在 DWD 代理键解析前完成
     start >> [ods_load, dim_stg_load]
     dim_stg_load >> scd2_preview >> scd2_apply
-    [ods_load, scd2_apply] >> dwd_detail >> dq_check >> end
+    [ods_load, scd2_apply] >> dwd_detail >> dq_check
+    dwd_detail >> timeliness
+    [dq_check, timeliness] >> end

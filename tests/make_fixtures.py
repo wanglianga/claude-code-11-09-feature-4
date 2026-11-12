@@ -14,6 +14,9 @@
   WB006 关键节点缺失后迟到补报（11-05 才补 11-01 的 ARRIVE，补数重放）
   WB007 未知网点 HUB_GHOST（代理键 -1，DQ 维表未匹配率）
   WB009 网点改名/派件员换片区/客户等级调整的时点关联验证
+  WB010 双口径时效：内部考核达标、客户口径投诉（下单早/备货/两次改约/送达晚）
+  WB011 双口径时效：双达标（无改约，备货扣减后净时长最短）
+  WB012 双口径时效：双不达标（压货导致两套口径均超阈值，含一次改约）
 """
 from __future__ import annotations
 
@@ -211,6 +214,113 @@ def build_event_files() -> dict[str, list[dict]]:
            hub_code="HUB_BJ", courier_code="C001",
            customer_code="K001", **common),
     ]
+
+    # ---- WB010 内部考核达标 / 客户口径投诉 ----
+    # 内部：揽收 11-01 16:00 -> 签收 11-03 15:00 = 47h(2820m) <= 2880 达标
+    # 客户：下单 11-01 01:00 -> 送达 11-03 14:00 毛时长 61h(3660m)，
+    #       扣备货 120m + 两次改约 240m，净时长 3300m > 3000 投诉
+    f["2026-11-01"] += [
+        ev("EA01", "WB010", "ORDER", "ORDER_SYS",
+           "2026-11-01 01:00:00", "2026-11-01 01:00:30",
+           origin_hub_code="HUB_SH", hub_code="HUB_SH",
+           customer_code="K001", stockup_minutes=120, **common),
+        ev("EA02", "WB010", "PICKUP", "SCANNER",
+           "2026-11-01 16:00:00", "2026-11-01 16:05:00",
+           origin_hub_code="HUB_SH", hub_code="HUB_SH", courier_code="C001",
+           customer_code="K001", **common),
+        ev("EA03", "WB010", "RESCHEDULE", "ORDER_SYS",
+           "2026-11-01 21:00:00", "2026-11-01 21:02:00",
+           hub_code="HUB_SH", customer_code="K001", **common),
+        ev("EA04", "WB010", "DEPART", "HUB",
+           "2026-11-02 08:00:00", "2026-11-02 08:10:00",
+           hub_code="HUB_SH", next_hub_code="HUB_BJ",
+           customer_code="K001", **common),
+        ev("EA05", "WB010", "ARRIVE", "HUB",
+           "2026-11-02 22:00:00", "2026-11-02 22:15:00",
+           hub_code="HUB_BJ", customer_code="K001", **common),
+    ]
+    f["2026-11-03"] += [
+        ev("EA06", "WB010", "RESCHEDULE", "ORDER_SYS",
+           "2026-11-03 09:00:00", "2026-11-03 09:02:00",
+           hub_code="HUB_BJ", customer_code="K001", **common),
+        ev("EA07", "WB010", "DELIVER", "SCANNER",
+           "2026-11-03 14:00:00", "2026-11-03 14:05:00",
+           hub_code="HUB_BJ", courier_code="C002",
+           customer_code="K001", **common),
+        ev("EA08", "WB010", "SIGN", "SCANNER",
+           "2026-11-03 15:00:00", "2026-11-03 15:05:00",
+           hub_code="HUB_BJ", courier_code="C002",
+           customer_code="K001", **common),
+    ]
+
+    # ---- WB011 双达标：无改约，备货扣减后净时长最短 ----
+    # 内部：11-02 08:00 -> 11-03 09:00 = 25h(1500m)；客户净时长 1380m
+    f["2026-11-02"] += [
+        ev("EB01", "WB011", "ORDER", "ORDER_SYS",
+           "2026-11-02 06:00:00", "2026-11-02 06:00:30",
+           origin_hub_code="HUB_SH", hub_code="HUB_SH",
+           customer_code="K002", stockup_minutes=180, **common),
+        ev("EB02", "WB011", "PICKUP", "SCANNER",
+           "2026-11-02 08:00:00", "2026-11-02 08:05:00",
+           origin_hub_code="HUB_SH", hub_code="HUB_SH", courier_code="C001",
+           customer_code="K002", **common),
+        ev("EB03", "WB011", "DEPART", "HUB",
+           "2026-11-02 10:00:00", "2026-11-02 10:10:00",
+           hub_code="HUB_SH", next_hub_code="HUB_BJ",
+           customer_code="K002", **common),
+        ev("EB04", "WB011", "ARRIVE", "HUB",
+           "2026-11-02 22:00:00", "2026-11-02 22:15:00",
+           hub_code="HUB_BJ", customer_code="K002", **common),
+    ]
+    f["2026-11-03"] += [
+        ev("EB05", "WB011", "DELIVER", "SCANNER",
+           "2026-11-03 08:00:00", "2026-11-03 08:05:00",
+           hub_code="HUB_BJ", courier_code="C002",
+           customer_code="K002", **common),
+        ev("EB06", "WB011", "SIGN", "SCANNER",
+           "2026-11-03 09:00:00", "2026-11-03 09:05:00",
+           hub_code="HUB_BJ", courier_code="C002",
+           customer_code="K002", **common),
+    ]
+
+    # ---- WB012 双不达标：分拨压货，含一次改约 ----
+    # 内部：11-01 09:00 -> 11-04 12:00 = 75h(4500m) > 2880
+    # 客户：毛时长 77h(4620m)，扣备货 60m + 改约 120m，净 4440m > 3000 投诉
+    f["2026-11-01"] += [
+        ev("EC01", "WB012", "ORDER", "ORDER_SYS",
+           "2026-11-01 05:00:00", "2026-11-01 05:00:30",
+           origin_hub_code="HUB_SH", hub_code="HUB_SH",
+           customer_code="K002", stockup_minutes=60, **common),
+        ev("EC02", "WB012", "PICKUP", "SCANNER",
+           "2026-11-01 09:00:00", "2026-11-01 09:05:00",
+           origin_hub_code="HUB_SH", hub_code="HUB_SH", courier_code="C001",
+           customer_code="K002", **common),
+        ev("EC03", "WB012", "DEPART", "HUB",
+           "2026-11-01 12:00:00", "2026-11-01 12:10:00",
+           hub_code="HUB_SH", next_hub_code="HUB_BJ",
+           customer_code="K002", **common),
+        ev("EC04", "WB012", "ARRIVE", "HUB",
+           "2026-11-01 22:00:00", "2026-11-01 22:15:00",
+           hub_code="HUB_BJ", customer_code="K002", **common),
+    ]
+    f["2026-11-02"] += [
+        ev("EC05", "WB012", "RESCHEDULE", "ORDER_SYS",
+           "2026-11-02 10:00:00", "2026-11-02 10:02:00",
+           hub_code="HUB_BJ", customer_code="K002", **common),
+    ]
+    f["2026-11-04"] += [
+        ev("EC06", "WB012", "DEPART", "HUB",
+           "2026-11-04 08:00:00", "2026-11-04 08:10:00",
+           hub_code="HUB_BJ", customer_code="K002", **common),
+        ev("EC07", "WB012", "DELIVER", "SCANNER",
+           "2026-11-04 10:00:00", "2026-11-04 10:05:00",
+           hub_code="HUB_BJ", courier_code="C002",
+           customer_code="K002", **common),
+        ev("EC08", "WB012", "SIGN", "SCANNER",
+           "2026-11-04 12:00:00", "2026-11-04 12:05:00",
+           hub_code="HUB_BJ", courier_code="C002",
+           customer_code="K002", **common),
+    ]
     return f
 
 
@@ -345,6 +455,11 @@ dq.threshold.dim_unmatched_rate=0.01
 dq.threshold.partition_latency_minutes=180
 backfill.shadow.suffix=_shadow
 backfill.output.dir={root}/data/backfill
+# 双口径时效（阈值刻意取小，便于夹具构造"内部达标/客户投诉"并存场景）
+timeliness.internal.threshold_minutes=2880
+timeliness.customer.threshold_minutes=3000
+timeliness.customer.reschedule_deduct_minutes=120
+timeliness.caliber.seed_from=2026-11-01
 """
     (root / "conf/pipeline.local.conf").write_text(conf, encoding="utf-8")
     print(f"[fixtures] root={root} 事件落地日={list(event_files)} "

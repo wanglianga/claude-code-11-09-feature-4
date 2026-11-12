@@ -60,11 +60,22 @@ DIM_SPECS = {
 WM_LOG = "ltl.meta.watermark_log"
 DQ_TABLE = "ltl.meta.dq_daily_result"
 BACKFILL_LOG = "ltl.meta.backfill_job_log"
+# 双口径时效（见 sql/09_timeliness.sql）
+CALIBER_DEF = "ltl.meta.caliber_definition"
+TIMELINESS_FACT = "ltl.app.timeliness_waybill_fact"
+PERIOD_REPORT = "ltl.meta.timeliness_period_report"
 
 UNMATCHED_SK = -1
 FUTURE_DATE = "9999-12-31"
+# ORDER 下单 / RESCHEDULE 客户改约为双口径时效新增枚举：
+# 新节点只是新枚举值，ODS/DWD 无需加时间列（备货时长落在 stockup_minutes 属性列）。
 EVENT_TYPES = ["PICKUP", "DEPART", "ARRIVE", "TRANSFER",
-               "DELIVER", "SIGN", "REJECT", "EXCEPTION", "POD"]
+               "DELIVER", "SIGN", "REJECT", "EXCEPTION", "POD",
+               "ORDER", "RESCHEDULE"]
+
+# 时效口径编码
+CALIBER_INTERNAL = "INTERNAL"
+CALIBER_CUSTOMER = "CUSTOMER"
 
 
 def load_conf(path: str | None = None) -> dict:

@@ -28,6 +28,13 @@
 -- ALTER TABLE ltl.dwd.waybill_event_detail ADD COLUMN weight_kg_v2 DECIMAL(12,3);
 -- ALTER TABLE ltl.dim.dim_hub ADD COLUMN cold_storage_capable BOOLEAN;
 
+-- 双口径时效（sql/09_timeliness.sql）：新事件枚举 ORDER/RESCHEDULE 无需加时间列，
+-- 仅新增两个属性列承载备货时长与改约序号，历史行回填 0：
+-- ALTER TABLE ltl.dwd.waybill_event_detail ADD COLUMN stockup_minutes BIGINT;
+-- UPDATE ltl.dwd.waybill_event_detail SET stockup_minutes=0 WHERE stockup_minutes IS NULL;
+-- ALTER TABLE ltl.dwd.waybill_event_detail ADD COLUMN reschedule_seq INT;
+-- UPDATE ltl.dwd.waybill_event_detail SET reschedule_seq=0 WHERE reschedule_seq IS NULL;
+
 -- 明年新作业节点（如 STATION_IN）只是 event_type 新枚举，无需加时间列。
 
 -- ---- 禁止项（仅作文档，不会执行）----

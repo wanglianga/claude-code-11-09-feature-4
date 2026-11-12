@@ -13,6 +13,7 @@
 | DIM | `dim.dim_hub / dim_courier / dim_route / dim_customer` | SCD2 拉链，`[eff_date, exp_date)` |
 | APP | `app.v_*` | 明细层之上的投影视图，含旧宽表兼容视图 |
 | META | `meta.watermark_log / dq_daily_result / backfill_job_log` | 水位线、质量、补数台账 |
+| 时效 | `meta.caliber_definition / timeliness_period_report`、`app.timeliness_waybill_fact` | 双口径时效的口径版本台账、运单双口径事实、周期版本报表（见第 11 节） |
 
 ## 1. 环境准备（回滚点 R0：未动任何生产数据）
 
@@ -128,3 +129,41 @@ spark-submit jobs/backfill_job.py --scope DATE_RANGE \
 | R3 | 双跑期 | 暂停 DAG，连接串指回旧宽表 |
 | R4 | 视图切换 | 指回保留的物理旧宽表 |
 | R5 | 补数/回刷 | Iceberg 快照回滚 或 backup 表换名 |
+
+## 11. 双口径时效治理（内部考核 + 客户感知）
+
+时效指标两套口径并存，定义与公式见 `sql/09_timeliness.sql` 与
+`jobs/timeliness_job.py`，配置项为 `conf/pipeline.conf` 的 `timeliness.*`。
+
+### 11.1 上线步骤（幂等）
+
+1. 建仓已含 `sql/09_timeliness.sql`（ddl_init 自动执行）；历史仓库升级时重跑
+   `ddl_init.py` 即可补建三张新表与视图，不影响既有表。
+2. 登记口径初始版本：`timeliness_job.py seed-calibers`（容器首启自动执行）。
+3. 历史运单回填：按完结日区间逐日 `compute --biz-date <date>`，
+   或对指定运单集合补算；事实按 `waybill_no` MERGE，可安全重跑。
+4. 每日增量 DAG 已挂 `timeliness_compute` 任务，DWD 明细就绪后自动计算。
+5. 周期考核由 `ltl_timeliness_governance` 手动 DAG（或同名命令）出具，
+   防止自动任务静默重排历史排名。
+
+### 11.2 口径切换与周期重出纪律
+
+- 切换只能 `register-version`：旧版本闭合为 `RETIRED` 并保留原始阈值，
+  新版本带新生效日与变更原因；**禁止改、删历史定义行**。
+- 事实按完结日时点解析口径版本并快照版本号/阈值；新版本生效日前完结的运单
+  仍挂旧版本，重算也不会回刷其历史结论。
+- 考核周期内换口径：先按新版本重算该周期运单事实，再 `issue-period` 重出。
+  报表只追加 `report_version`，旧版置 `SUPERSEDED`，`reissue_reason` 标注
+  `旧版本->新版本`；`rank_snapshot` 内的历史排名原样冻结，
+  **禁止用新口径重排历史排名**——历史排名只能读快照。
+- 差异可解释：每条事实的 `diff_breakdown` 四分量（下单→揽收等待、
+  送达→签收时差、备货扣减、改约扣减）之和恒等于两口径时长差。
+
+### 11.3 新增事件与属性（只加列演进）
+
+- 新事件枚举 `ORDER`（下单，携带 `stockup_minutes` 备货时长）与
+  `RESCHEDULE`（客户改约，DWD 累计 `reschedule_seq`）无需加时间列。
+- DWD 新增两列 `stockup_minutes BIGINT`、`reschedule_seq INT`，
+  已纳入 `schema_evolution_job.py --apply-builtin`，历史行回填 0。
+- 回滚：口径登记/事实/报表均为独立新表，停用时效作业不影响既有链路；
+  事实表可用 Iceberg 快照回滚，周期报表只追加不覆盖，误出具可再追加一版纠正。

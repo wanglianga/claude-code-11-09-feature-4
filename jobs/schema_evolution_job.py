@@ -35,6 +35,11 @@ BUILTIN_COLUMNS = [
      "重量高精度版；旧 weight_kg 保留不删，视图切换到本列"),
     (DIM_TABLES["hub"], "cold_storage_capable", "BOOLEAN", "false",
      "是否具备冷链仓储能力；历史回填false"),
+    # 双口径时效列（见 sql/09_timeliness.sql）
+    (DWD_EVENT, "stockup_minutes", "BIGINT", "0",
+     "商家备货时长(分钟)，ORDER事件携带；历史数据回填0"),
+    (DWD_EVENT, "reschedule_seq", "INT", "0",
+     "客户改约序号，RESCHEDULE事件计数；未改约/历史回填0"),
 ]
 
 

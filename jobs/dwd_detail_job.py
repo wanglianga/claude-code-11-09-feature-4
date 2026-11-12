@@ -19,7 +19,7 @@ import argparse
 
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
-    BooleanType, StringType, StructField, StructType,
+    BooleanType, LongType, StringType, StructField, StructType,
 )
 from pyspark.sql.window import Window
 
@@ -40,6 +40,8 @@ _PAYLOAD_SCHEMA = StructType([
     StructField("exception_reason", StringType()),
     StructField("appointment_window", StringType()),
     StructField("is_cold_chain", BooleanType()),
+    # 双口径时效：ORDER 携带备货时长；RESCHEDULE 为客户改约事件
+    StructField("stockup_minutes", LongType()),
 ])
 
 
@@ -111,6 +113,8 @@ def build_detail(spark, start_date=None, end_date=None,
             F.col("p.exception_reason").alias("exception_reason"),
             F.coalesce(F.col("p.appointment_window"), F.lit("NA")).alias("appointment_window"),
             F.coalesce(F.col("p.is_cold_chain"), F.lit(False)).alias("is_cold_chain"),
+            # 备货时长仅 ORDER 报文携带，其余事件缺字段得 NULL 后统一回填 0
+            F.coalesce(F.col("p.stockup_minutes"), F.lit(0)).alias("stockup_minutes"),
         )
     )
 
@@ -137,8 +141,18 @@ def build_detail(spark, start_date=None, end_date=None,
     # 乱序排序生成事件序号（业务发生时间为准，event_id 兜底保证确定性）
     w_seq = Window.partitionBy("waybill_no").orderBy(
         F.col("event_time").asc(), F.col("event_id").asc())
+    # 改约序号：RESCHEDULE 事件按业务时间累计计数（第1次改约=1），其他事件恒为 0
+    w_rs = (Window.partitionBy("waybill_no")
+            .orderBy(F.col("event_time").asc(), F.col("event_id").asc())
+            .rowsBetween(Window.unboundedPreceding, Window.currentRow))
     detail = (
         detail.withColumn("event_seq", F.row_number().over(w_seq))
+        .withColumn(
+            "reschedule_seq",
+            F.when(F.col("event_type") == "RESCHEDULE",
+                   F.sum(F.when(F.col("event_type") == "RESCHEDULE", 1)
+                           .otherwise(0)).over(w_rs))
+             .otherwise(0))
         .withColumn("ingest_batch_id", F.lit(batch_id))
         .withColumn("ingest_time", F.current_timestamp())
     )
@@ -151,6 +165,8 @@ def build_detail(spark, start_date=None, end_date=None,
         "station_code": F.lit("NA"),
         "weight_kg_v2": F.lit(-1.0),
         "evol_test_col": F.lit("NA"),
+        "stockup_minutes": F.lit(0),
+        "reschedule_seq": F.lit(0),
     }
     target_cols = spark.table(DWD_EVENT).columns
     for c in target_cols:

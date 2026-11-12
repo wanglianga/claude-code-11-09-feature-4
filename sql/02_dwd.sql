@@ -49,6 +49,12 @@ CREATE TABLE IF NOT EXISTS ltl.dwd.waybill_event_detail (
     appointment_window STRING     COMMENT '预约送达时段，如 2026-11-12 09:00-11:00；历史数据回填NA',
     is_cold_chain      BOOLEAN    COMMENT '是否冷链；历史数据回填false',
 
+    -- 双口径时效属性（只加列演进；仅 ORDER/RESCHEDULE 事件取值，其他事件为默认值）：
+    -- stockup_minutes 来自 ORDER 报文的商家备货时长，客户口径据此扣减；
+    -- reschedule_seq 为 RESCHEDULE 事件在同运单内的改约序号（从1开始），客户口径按次扣减。
+    stockup_minutes    BIGINT     COMMENT '商家备货时长(分钟)，ORDER事件携带；其他事件/历史回填0',
+    reschedule_seq     INT        COMMENT '客户改约序号，RESCHEDULE事件计数；未改约/历史回填0',
+
     ingest_batch_id   STRING      COMMENT '最近一次写入/重放的批次',
     ingest_time       TIMESTAMP   COMMENT '最近一次写入时间'
 )

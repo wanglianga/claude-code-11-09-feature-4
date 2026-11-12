@@ -27,6 +27,7 @@ sql/                         四层建表与视图（Spark 3.5 SQL + Iceberg 1.8
   06_app_views.sql           应用层视图（含旧宽表兼容视图、压货、绩效、投诉归因）
   07_evolution.sql           Schema 演进规则参考（实际由作业幂等执行）
   08_legacy_source.sql       旧宽表迁移源登记
+  09_timeliness.sql          双口径时效：口径版本台账/运单双口径事实/周期版本报表/并列视图
 jobs/                        PySpark 作业
   ddl_init.py                一键建仓（幂等）
   ods_load.py                原始接入（原样保存、文件级幂等）
@@ -37,12 +38,13 @@ jobs/                        PySpark 作业
   dq_check_job.py            五类质量指标按天×来源×分拨
   schema_evolution_job.py    只加列+历史回填（幂等）
   legacy_migrate_job.py      旧宽表时间列逆透视迁移
-orchestration/dags/          Airflow DAG（每日增量、手动补数）
+  timeliness_job.py          双口径时效：口径登记/事实计算/周期出具/口径版本切换
+orchestration/dags/          Airflow DAG（每日增量、手动补数、时效治理手动 DAG）
 docker/                      Dockerfile + entrypoint
 docker-compose.yml           一键启动 Airflow+Spark
 conf/pipeline.conf           全局配置（catalog、阈值、目录）
 scripts/run_local.sh         本地无 Docker 一键验证
-tests/                       夹具生成、13 项端到端断言、旧宽表迁移冒烟
+tests/                       夹具生成、19 项端到端断言（含 6 项双口径）、旧宽表迁移冒烟
 docs/migration_guide.md      迁移步骤、执行顺序与回滚点（R0–R5）
 ```
 
@@ -96,8 +98,9 @@ bash scripts/run_local.sh
 ```
 
 该脚本会：生成夹具 → 建仓 → 两期维表拉链 → 四天事件增量 → DQ →
-11-05 迟到事件补数 → 跑 `pytest`。结束打印 `ALL LOCAL STEPS DONE` 与
-`13 passed` 即通过。
+11-05 迟到事件补数 → 旧宽表迁移冒烟 → 双口径时效（口径登记、事实计算、
+口径切换演练、周期报表重出）→ 跑 `pytest`。结束打印 `ALL LOCAL STEPS DONE` 与
+`19 passed` 即通过。
 
 也可单步执行（均为幂等）：
 
@@ -111,7 +114,8 @@ $SPARK_HOME/bin/spark-submit --master local[2] jobs/backfill_job.py        --con
 
 ## 6. 验证方式与覆盖点
 
-`tests/test_pipeline.py` 的 13 项断言（已在本地 Spark+Iceberg 实际执行通过）覆盖：
+`tests/test_pipeline.py` 的 13 项断言与 `tests/test_timeliness.py` 的 6 项断言
+（共 19 项，已在本地 Spark+Iceberg 实际执行通过）覆盖：
 
 1. ODS 原样保存重复上报与原始报文，不清洗不合并；
 2. DWD 按 `event_id` 去重；
@@ -125,7 +129,13 @@ $SPARK_HOME/bin/spark-submit --master local[2] jobs/backfill_job.py        --con
 10. 补数只动受影响运单，台账含分区清单/前后对比/差异，对比文件落盘；
 11. 水位线按 ODS/DWD 分层按日推进；
 12. Schema 只加列+回填，既有视图与报表不受影响、加列幂等；
-13. 旧宽表兼容视图一行一运单、关键时间列与新列正确透视。
+13. 旧宽表兼容视图一行一运单、关键时间列与新列正确透视；
+14. 双口径算术正确：内部=揽收→签收；客户=下单→送达并扣备货/改约，阈值与版本随事实快照；
+15. 同一运单可同时"内部达标/客户投诉"，`v_timeliness_dual` 并列展示并给出差异来源；
+16. 差异拆解四项分量之和恰好等于两口径时长差（可对账、可向客服解释）；
+17. 口径切换只新增版本：旧版本闭合保留、11-02 及以前完结的运单仍挂旧版本，不回刷历史；
+18. 周期报表追加 `report_version`，旧版 `SUPERSEDED` 且排名快照冻结，禁止新口径重排历史排名；
+19. 口径登记/事实 MERGE 幂等，排名视图按口径版本隔离不跨版本混算。
 
 另有 `tests/smoke_legacy_migration.py` 验证旧宽表逆透视迁移与重跑幂等。
 
@@ -133,7 +143,65 @@ $SPARK_HOME/bin/spark-submit --master local[2] jobs/backfill_job.py        --con
 > 未在本环境构建/启动 Docker 镜像（沙箱无 Docker daemon），Dockerfile/compose 已按
 > 相同版本与命令编写，需在具备 Docker 的环境执行第 4 节验证。
 
-## 7. 关键作业口径速查
+## 7. 双口径时效指标（内部考核 + 客户感知）
+
+两套口径**并存、各自可解释、版本化治理**，建表与视图见 `sql/09_timeliness.sql`，
+作业见 `jobs/timeliness_job.py`。
+
+### 7.1 口径定义
+
+| 维度 | 内部考核口径 `INTERNAL` | 客户感知口径 `CUSTOMER` |
+|---|---|---|
+| 计时起点 | 揽收扫描 `PICKUP` | 下单 `ORDER`（旧链路无 ORDER 时兜底 PICKUP，并打 `order_time_fallback`） |
+| 计时终点 | 签收扫描 `SIGN` | 实际送达 `DELIVER`（缺失兜底 SIGN） |
+| 扣减项 | 无 | 商家备货时长 `stockup_minutes` + 改约次数 × 单次扣减分钟 |
+| 公式 | `SIGN - PICKUP` | `净时长 = (送达-下单) - 备货 - 改约次数×单次扣减` |
+| 结论 | `internal_met`（时长 ≤ 阈值） | `customer_met` / `complaint_flag`（净时长 > 阈值即投诉） |
+
+阈值与单次改约扣减在 `conf/pipeline.conf` 的 `timeliness.*` 配置，登记进
+`meta.caliber_definition` 后由作业快照到每条事实，报表数字可回溯到当时口径。
+
+### 7.2 并列展示与差异解释
+
+- `app.timeliness_waybill_fact` 一行一运单，两套口径的锚点时间、毛/净时长、
+  扣减项、阈值、达标结论同表保存；`app.v_timeliness_dual` 直接给出
+  `dual_conclusion`（内部达标/客户投诉、双达标、双不达标等）。
+- 夹具 WB010 即"同一运单同一天内部达标（2820m ≤ 2880m）且客户投诉
+  （净 3300m > 3000m）"的实例。
+- `diff_breakdown` 把两口径时长差拆成四个有符号分量：下单→揽收等待、
+  送达→签收时差、备货扣减、改约扣减，分量之和恒等于 `diff_minutes`，可逐单对账。
+
+### 7.3 版本治理纪律（强制）
+
+1. **口径切换只增版本**：`register-version` 把旧版本 `effective_to` 闭合、
+   `status=RETIRED`（行与原始阈值保留不删），再插入新版本；禁止 UPDATE 历史定义。
+2. **历史结论不覆盖**：事实按运单完结日时点解析生效口径版本（严格
+   `[effective_from, effective_to)`），并把版本号与阈值快照到事实行；
+   新版本生效日之前完结的运单永远挂旧版本。
+3. **周期内换口径必须重出并标注版本**：`issue-period` 对同一
+   `period_id + caliber` 追加 `report_version`，旧版置 `SUPERSEDED`，
+   `reissue_reason` 写明 `旧版本->新版本`；历史排名只存在 `rank_snapshot`
+   JSON 快照里，**禁止用新口径回写或重排历史排名**。
+4. 当期实时排名只能看 `v_timeliness_ranking_current`（显式带口径版本列），
+   历史周期排名只能读周期报表快照。
+
+常用命令：
+
+```bash
+# 一次性登记两套口径初始版本（容器首次启动自动执行，幂等）
+spark-submit jobs/timeliness_job.py seed-calibers --conf $PIPELINE_CONF
+# 每日按运单完结日计算双口径事实（已接入每日 DAG，MERGE 幂等）
+spark-submit jobs/timeliness_job.py compute --biz-date 2026-11-03 --conf $PIPELINE_CONF
+# 口径切换：客户口径 v2026.2 收紧阈值，11-03 起生效
+spark-submit jobs/timeliness_job.py register-version --caliber CUSTOMER \
+    --version v2026.2 --effective-from 2026-11-03 --threshold 1800 --reason "承诺时效收紧"
+# 重出周期结果（追加版本，旧版 SUPERSEDED，排名快照冻结）
+spark-submit jobs/timeliness_job.py issue-period --period-id 2026-11-W1 \
+    --period-type WEEK --start 2026-11-01 --end 2026-11-05 --caliber BOTH \
+    --reason "考核周期内客户口径切换，按新版本重新出具"
+```
+
+## 8. 关键作业口径速查
 
 - **增量**：`meta.watermark_log` 记事件时间水位，每日推进；失败不写 SUCCESS、不推进。
 - **补数**：默认只产出对比（`DIFF_READY`），加 `--switch` 才生效；
@@ -141,5 +209,12 @@ $SPARK_HOME/bin/spark-submit --master local[2] jobs/backfill_job.py        --con
 - **维表变更**：先 `--preview` 看重算影响（历史不受影响行数），再正式拉链；
   调整只在快照日新分区生效。
 - **质量阈值**：`conf/pipeline.conf` 中 `dq.threshold.*`。
+- **双口径时效**：阈值/改约扣减在 `conf/pipeline.conf` 的 `timeliness.*`；
+  口径切换只能 `register-version` 增版本（旧版 RETIRED 保留），周期重出走
+  `issue-period` 追加 `report_version`，历史排名只读 `rank_snapshot`，
+  禁止新口径重排（详见第 7 节）。
+- **历史仓库升级**：重跑 `ddl_init.py` 补建新表/视图，再执行
+  `schema_evolution_job.py --apply-builtin` 给 DWD 补 `stockup_minutes`、
+  `reschedule_seq` 两列（历史回填 0），然后 `seed-calibers` + 逐日 `compute`。
 
 迁移的完整执行顺序与回滚点见 **[docs/migration_guide.md](docs/migration_guide.md)**（R0–R5）。

@@ -7,9 +7,10 @@ case "${1:-standalone}" in
     export AIRFLOW__CORE__LOAD_EXAMPLES=${AIRFLOW__CORE__LOAD_EXAMPLES:-false}
     export AIRFLOW__CORE__DAGS_FOLDER=/opt/ltl/orchestration/dags
     export AIRFLOW__CORE__ENABLE_XCOM_PICKLING=true
-    # 首次启动自动建仓
+    # 首次启动自动建仓 + 幂等登记双口径时效初始版本
     if [ ! -f /opt/warehouse/.initialized ]; then
       spark-submit --master local[2] /opt/ltl/jobs/ddl_init.py --conf "$PIPELINE_CONF"
+      spark-submit --master local[2] /opt/ltl/jobs/timeliness_job.py --conf "$PIPELINE_CONF" seed-calibers
       touch /opt/warehouse/.initialized
     fi
     exec airflow standalone
